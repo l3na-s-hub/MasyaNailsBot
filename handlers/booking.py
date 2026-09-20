@@ -49,6 +49,8 @@ def next_nails_step(selected: dict, current: str) -> str | None:
     if current == "procedure":
         if selected.get("procedure") == "no_coating":
             return "without_type"
+        if selected.get("procedure") == "repair":
+            return None  # сразу итог → дата
         return "has_coating"
     if current == "has_coating":
         if selected.get("has_coating") == "yes":

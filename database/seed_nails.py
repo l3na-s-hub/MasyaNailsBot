@@ -2,7 +2,7 @@
 from sqlalchemy import select, delete
 from database.models import Service, ServiceParameter
 
-FLOW_VERSION = "v6_natural_design8"
+FLOW_VERSION = "v7_repair"
 
 
 def nails_parameters(service_id: int) -> list:
@@ -20,6 +20,7 @@ def nails_parameters(service_id: int) -> list:
     t = "Выбери процедуру:"
     add("procedure", t, "with_coating", "Маникюр с покрытием", 0, 0, 1)
     add("procedure", t, "no_coating", "Маникюр без покрытия", 0, 0, 2)
+    add("procedure", t, "repair", "Ремонт", 0, 0, 3)
 
     # 2. Без покрытия — 4 услуги → сразу окошки
     t2 = "На что именно записываемся?"
@@ -105,8 +106,8 @@ async def reseed_nails_flow(session):
     result = await session.execute(
         select(ServiceParameter).where(
             ServiceParameter.service_id == nails.id,
-            ServiceParameter.step_code == "design",
-            ServiceParameter.option_code == "gel_vtira",
+            ServiceParameter.step_code == "procedure",
+            ServiceParameter.option_code == "repair",
         ).limit(1)
     )
     if result.scalar_one_or_none():
@@ -119,4 +120,4 @@ async def reseed_nails_flow(session):
     )
     session.add_all(nails_parameters(nails.id))
     await session.commit()
-    print("Маникюр: флоу v6 (натуральные/наращивание, 8 длина, дизайн втирка)")
+    print("Маникюр: флоу v7 (+ ремонт → сразу дата)")
