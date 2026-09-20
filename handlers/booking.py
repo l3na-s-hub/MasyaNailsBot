@@ -23,14 +23,18 @@ from config import settings, TZ
 router = Router(name="booking")
 
 # Порядок шагов для «Назад»
-NAILS_ORDER = ["procedure", "has_coating", "coating_type", "length", "claws", "design", "communication", "without_type"]
+NAILS_ORDER = [
+    "procedure", "has_coating", "nails_condition", "claws",
+    "coating_type", "length", "design", "communication", "without_type",
+]
 
 STEP_LABELS = {
     "procedure": "Процедура",
     "has_coating": "Текущее покрытие",
+    "nails_condition": "Особенности покрытия",
+    "claws": "Когти",
     "coating_type": "Тип покрытия",
     "length": "Длина",
-    "claws": "Когти",
     "design": "Дизайн",
     "communication": "Общение",
     "without_type": "Без покрытия",
@@ -38,20 +42,27 @@ STEP_LABELS = {
 
 
 def next_nails_step(selected: dict, current: str) -> str | None:
-    """процедура → покрытие → тип → [длина] → когти → дизайн → общение → итог."""
+    """
+    без покрытия → 4 услуги → окошки
+    с покрытием → есть? → [состояние] → когти → тип → [длина] → дизайн → общение
+    """
     if current == "procedure":
         if selected.get("procedure") == "no_coating":
             return "without_type"
         return "has_coating"
     if current == "has_coating":
+        if selected.get("has_coating") == "yes":
+            return "nails_condition"
+        return "claws"
+    if current == "nails_condition":
+        return "claws"
+    if current == "claws":
         return "coating_type"
     if current == "coating_type":
         if selected.get("coating_type") == "build":
             return "length"
-        return "claws"
+        return "design"
     if current == "length":
-        return "claws"
-    if current == "claws":
         return "design"
     if current == "design":
         return "communication"
@@ -65,16 +76,20 @@ def next_nails_step(selected: dict, current: str) -> str | None:
 def prev_nails_step(selected: dict, current: str) -> str | None:
     if current == "has_coating":
         return "procedure"
-    if current == "coating_type":
+    if current == "nails_condition":
         return "has_coating"
+    if current == "claws":
+        if selected.get("has_coating") == "yes":
+            return "nails_condition"
+        return "has_coating"
+    if current == "coating_type":
+        return "claws"
     if current == "length":
         return "coating_type"
-    if current == "claws":
+    if current == "design":
         if selected.get("coating_type") == "build":
             return "length"
         return "coating_type"
-    if current == "design":
-        return "claws"
     if current == "communication":
         return "design"
     if current == "without_type":
@@ -223,6 +238,7 @@ async def _show_next_step(target, state: FSMContext, next_step: str | None, is_m
         state_map = {
             "procedure": BookingStates.has_coating,
             "has_coating": BookingStates.has_coating,
+            "nails_condition": BookingStates.nails_condition,
             "coating_type": BookingStates.has_coating,
             "without_type": BookingStates.has_coating,
             "length": BookingStates.length,
@@ -255,7 +271,7 @@ async def param_back(callback: CallbackQuery, state: FSMContext):
     selected = dict(data.get("selected_params", {}))
     selected_texts = dict(data.get("selected_params_text", {}))
     # убрать ответы начиная с prev и дальше по цепочке
-    drop_from = ["procedure", "has_coating", "coating_type", "length", "claws", "design", "communication", "without_type"]
+    drop_from = ["procedure", "has_coating", "nails_condition", "claws", "coating_type", "length", "design", "communication", "without_type"]
     try:
         idx = drop_from.index(prev)
         for s in drop_from[idx:]:
@@ -402,6 +418,7 @@ async def admin_pick_option(callback: CallbackQuery, bot: Bot, state: FSMContext
         state_map = {
             "design": BookingStates.design, "length": BookingStates.length,
             "claws": BookingStates.claws, "communication": BookingStates.communication,
+            "nails_condition": BookingStates.nails_condition,
             "has_coating": BookingStates.has_coating, "coating_type": BookingStates.has_coating,
             "procedure": BookingStates.has_coating, "without_type": BookingStates.has_coating,
         }

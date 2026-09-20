@@ -16,7 +16,8 @@ from states.booking_states import BookingStates
 router = Router(name="manage")
 
 STEP_LABELS = {
-    "procedure": "Процедура", "has_coating": "Текущее покрытие", "coating_type": "Тип покрытия",
+    "procedure": "Процедура", "has_coating": "Текущее покрытие",
+    "nails_condition": "Особенности покрытия", "coating_type": "Тип покрытия",
     "without_type": "Без покрытия", "length": "Длина", "claws": "Когти",
     "communication": "Общение", "design": "Дизайн",
 }
@@ -145,20 +146,38 @@ async def do_cancel(callback: CallbackQuery, bot: Bot):
         hours = svc.hours_until(booking)
         ok = await svc.cancel_booking(bid)
     if ok:
-        note = ""
-        if hours < settings.CANCEL_FREE_HOURS:
-            note = f"\n\nПредоплата не возвращается. Новая запись — снова предоплата {settings.PREPAYMENT_AMOUNT} ₽."
-        await callback.message.edit_text("Запись отменена." + note)
-        await callback.message.answer("👇", reply_markup=main_reply_kb())
         name = callback.from_user.full_name or str(callback.from_user.id)
-        late = " (менее 2 дней, бронь сгорает)" if hours < settings.CANCEL_FREE_HOURS else ""
+        username = f"@{callback.from_user.username}" if callback.from_user.username else "—"
+        when = f"{booking.booking_date.strftime('%d-%m-%Y')} {booking.start_time.strftime('%H:%M')} · {booking.service.name}"
+
+        if hours < settings.CANCEL_FREE_HOURS:
+            note = (
+                f"\n\nПредоплата не возвращается. "
+                f"Новая запись — снова предоплата {settings.PREPAYMENT_AMOUNT} ₽."
+            )
+            await callback.message.edit_text("Запись отменена." + note)
+            admin_msg = (
+                f"❌ Клиентка отменила запись #{bid} (менее 2 дней — бронь сгорает)\n"
+                f"👤 {name} {username}\n{when}"
+            )
+        else:
+            async with async_session() as s2:
+                refund_text = await ContentService(s2).get_text(
+                    "msg_cancel_refund_client", master=settings.MASTER_USERNAME
+                )
+            await callback.message.edit_text(refund_text)
+            admin_msg = (
+                f"💸 Клиентка отменила запись #{bid} вовремя (≥2 дней)\n"
+                f"Нужно вернуть предоплату {settings.PREPAYMENT_AMOUNT} ₽\n"
+                f"👤 {name} {username}\n"
+                f"📱 {booking.user.phone or (booking.selected_params or {}).get('contact') or '—'}\n"
+                f"{when}"
+            )
+
+        await callback.message.answer("👇", reply_markup=main_reply_kb())
         for admin_id in settings.ADMIN_IDS:
             try:
-                await bot.send_message(
-                    admin_id,
-                    f"❌ Клиентка отменила запись #{bid}{late}\n👤 {name}\n"
-                    f"{booking.booking_date.strftime('%d-%m-%Y')} {booking.start_time.strftime('%H:%M')} · {booking.service.name}"
-                )
+                await bot.send_message(admin_id, admin_msg)
             except Exception:
                 pass
         await callback.answer("Отменено")

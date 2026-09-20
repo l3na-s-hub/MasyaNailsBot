@@ -44,6 +44,7 @@ def format_booking_summary(
 STEP_LABELS_RU = {
     "procedure": "Процедура",
     "has_coating": "Текущее покрытие",
+    "nails_condition": "Особенности покрытия",
     "coating_type": "Тип покрытия",
     "without_type": "Без покрытия",
     "length": "Длина",
