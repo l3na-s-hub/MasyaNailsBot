@@ -178,7 +178,17 @@ def admin_param_edit_kb(param_id: int, service_id: int) -> InlineKeyboardMarkup:
     builder.row(InlineKeyboardButton(text="✏️ Изменить текст кнопки", callback_data=f"admin_pe_text:{param_id}"))
     builder.row(InlineKeyboardButton(text="⏱ Изменить время (+/- мин)", callback_data=f"admin_pe_dur:{param_id}"))
     builder.row(InlineKeyboardButton(text="💰 Изменить цену (+/- ₽)", callback_data=f"admin_pe_price:{param_id}"))
+    builder.row(InlineKeyboardButton(text="🗑 Удалить кнопку", callback_data=f"admin_pe_del:{param_id}"))
     builder.row(InlineKeyboardButton(text="« К параметрам", callback_data=f"admin_svc_params:{service_id}"))
+    return builder.as_markup()
+
+
+def admin_param_delete_confirm_kb(param_id: int, service_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"admin_pe_delok:{param_id}"),
+        InlineKeyboardButton(text="« Отмена", callback_data=f"admin_param:{param_id}"),
+    )
     return builder.as_markup()
 
 

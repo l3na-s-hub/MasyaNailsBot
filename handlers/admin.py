@@ -10,7 +10,7 @@ from states.booking_states import AdminStates
 from keyboards.admin import (
     admin_main_kb, admin_month_nav_kb, admin_schedule_calendar_kb,
     admin_day_actions_kb, admin_slots_kb, admin_services_kb,
-    admin_service_actions_kb, admin_params_list_kb, admin_param_edit_kb,
+    admin_service_actions_kb, admin_params_list_kb, admin_param_edit_kb, admin_param_delete_confirm_kb,
     admin_content_kb, admin_content_item_kb, admin_backup_kb, admin_booking_actions_kb, admin_back_kb,
     admin_surcharge_pick_slot_kb, admin_surcharge_amount_kb,
     MONTH_NAMES
@@ -494,6 +494,57 @@ async def admin_param_detail(callback: CallbackQuery):
         parse_mode="HTML"
     )
     await callback.answer()
+
+
+
+@router.callback_query(F.data.startswith("admin_pe_del:"))
+async def admin_pe_del(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+    pid = int(callback.data.split(":")[1])
+    async with async_session() as session:
+        result = await session.execute(select(ServiceParameter).where(ServiceParameter.id == pid))
+        param = result.scalar_one_or_none()
+    if not param:
+        await callback.answer("Не найдено", show_alert=True)
+        return
+    await callback.message.edit_text(
+        f"🗑 Удалить кнопку «{param.option_text}»?\n"
+        f"Её больше не будет видно клиентам при записи.",
+        reply_markup=admin_param_delete_confirm_kb(param.id, param.service_id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_pe_delok:"))
+async def admin_pe_delok(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+    pid = int(callback.data.split(":")[1])
+    async with async_session() as session:
+        result = await session.execute(select(ServiceParameter).where(ServiceParameter.id == pid))
+        param = result.scalar_one_or_none()
+        if not param:
+            await callback.answer("Не найдено", show_alert=True)
+            return
+        sid = param.service_id
+        name = param.option_text
+        await session.delete(param)
+        await session.commit()
+    await callback.answer("Удалено")
+    await callback.message.edit_text(f"✅ Кнопка «{name}» удалена.")
+    # вернуться к списку параметров
+    async with async_session() as session:
+        result = await session.execute(
+            select(ServiceParameter)
+            .where(ServiceParameter.service_id == sid)
+            .order_by(ServiceParameter.step_code, ServiceParameter.sort_order)
+        )
+        params = list(result.scalars().all())
+    await callback.message.answer(
+        "Параметры услуги:",
+        reply_markup=admin_params_list_kb(params, sid),
+    )
 
 
 @router.callback_query(F.data.startswith("admin_pe_text:"))
