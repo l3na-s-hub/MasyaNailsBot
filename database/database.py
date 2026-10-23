@@ -29,6 +29,7 @@ async def init_db():
                     ("reschedule_count", "ALTER TABLE bookings ADD COLUMN reschedule_count INTEGER DEFAULT 0"),
                     ("last_reschedule_at", "ALTER TABLE bookings ADD COLUMN last_reschedule_at DATETIME"),
                     ("media_items", "ALTER TABLE content_blocks ADD COLUMN media_items JSON"),
+                    ("payment_timeout_notified", "ALTER TABLE bookings ADD COLUMN payment_timeout_notified BOOLEAN DEFAULT 0"),
                 ]:
                     if col not in bc:
                         try:

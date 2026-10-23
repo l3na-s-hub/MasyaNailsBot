@@ -118,8 +118,8 @@ class BookingService:
         return True
 
 
-    async def expire_unpaid_pending(self, minutes: int = 20) -> list:
-        """Отменяет pending_payment без скрина/заметки старше N минут. Возвращает список отменённых."""
+    async def find_unpaid_needing_admin(self, minutes: int = 20) -> list:
+        """pending_payment без скрина/заметки старше N мин, по которым ещё не спрашивали мастера."""
         from datetime import datetime, timedelta
         cutoff = datetime.utcnow() - timedelta(minutes=minutes)
         result = await self.session.execute(
@@ -130,23 +130,21 @@ class BookingService:
                 Booking.updated_at < cutoff,
             )
         )
-        expired = []
+        found = []
         for b in result.scalars().all():
-            # если уже прислали скрин или «от кого» — не трогаем (ждёт админа)
             if b.payment_photo_file_id or (b.payment_note and str(b.payment_note).strip()):
                 continue
-            b.status = "cancelled"
-            if b.calendar_event_id:
-                try:
-                    from services.google_calendar import delete_event
-                    delete_event(b.calendar_event_id)
-                except Exception:
-                    pass
-                b.calendar_event_id = None
-            expired.append(b)
-        if expired:
+            if getattr(b, "payment_timeout_notified", False):
+                continue
+            b.payment_timeout_notified = True
+            found.append(b)
+        if found:
             await self.session.commit()
-        return expired
+        return found
+
+    async def expire_unpaid_pending(self, minutes: int = 20) -> list:
+        """Совместимость: теперь только помечает для запроса мастеру (не отменяет)."""
+        return await self.find_unpaid_needing_admin(minutes)
 
     async def mark_completed(self, booking_id: int):
         booking = await self.get_booking_by_id(booking_id)

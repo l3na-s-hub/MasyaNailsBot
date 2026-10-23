@@ -574,7 +574,7 @@ async def contact_received(message: Message, state: FSMContext):
     await message.answer(
         f"<b>💳 Предоплата</b>\n\n{summary}\n📱 {contact}\n\n{pay_text}\n\n"
         f"После перевода <b>отправь скрин</b> или напиши, <b>от кого перевод</b>.\n\n"
-        f"⏳ На это есть <b>{mins} минут</b> — иначе окошко освободится.",
+        f"⏳ Пожалуйста, пришли скрин или «от кого перевод» в течение <b>{mins} мин</b>.\nЕсли не успеешь — мастер решит, оставить запись или отменить.",
         parse_mode="HTML"
     )
 

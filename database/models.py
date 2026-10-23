@@ -102,6 +102,8 @@ class Booking(Base):
     day_confirm_status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # yes/no/none
     reschedule_count: Mapped[int] = mapped_column(Integer, default=0)
     last_reschedule_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # мастер уже получил запрос «пришла ли предоплата?» после таймаута
+    payment_timeout_notified: Mapped[bool] = mapped_column(Boolean, default=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
