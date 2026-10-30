@@ -19,8 +19,17 @@ from services.backup_service import create_backup
 from services.google_calendar import create_event
 from utils.formatting import format_duration, format_price, format_booking_summary, format_selected_params
 from config import settings, TZ
+from services import pending_sessions
 
 router = Router(name="booking")
+
+
+def _is_admin(user_id: int) -> bool:
+    try:
+        return int(user_id) in {int(x) for x in settings.ADMIN_IDS}
+    except Exception:
+        return False
+
 
 # Порядок шагов для «Назад»
 NAILS_ORDER = [
@@ -323,26 +332,50 @@ async def photo_received(message: Message, state: FSMContext, bot: Bot):
     step = data.get("photo_after_step", "design")
     await state.update_data(photo_file_id=photo.file_id)
     await state.set_state(BookingStates.waiting_admin_choice)
+    data = await state.get_data()
+    cid = message.from_user.id
+    # критично: сохраняем вне FSM
+    try:
+        pending_sessions.save_session(cid, data, step)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"save_session failed: {e}")
+
     async with async_session() as session:
         msg = await ContentService(session).get_text("msg_photo_received")
     await message.answer(msg, parse_mode="HTML")
+
     async with async_session() as session:
         pricing = PricingService(session)
-        service = await pricing.get_service_by_code(data["service_code"])
-        options = [o for o in await pricing.get_parameters_for_step(service.id, step) if not o.requires_photo]
+        service = await pricing.get_service_by_code(data.get("service_code") or "")
+        if not service:
+            await message.answer("Ошибка записи. Начни заново через меню.")
+            return
+        options = [
+            o for o in await pricing.get_parameters_for_step(service.id, step)
+            if not o.requires_photo
+        ]
+
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     from aiogram.types import InlineKeyboardButton
     kb = InlineKeyboardBuilder()
-    cid = message.from_user.id
     for opt in options:
-        kb.row(InlineKeyboardButton(text=opt.option_text[:40], callback_data=f"adm_pick:{cid}:{step}:{opt.option_code}"))
+        cb = f"adm_pick:{cid}:{step}:{opt.option_code}"
+        if len(cb) > 64:
+            cb = f"adm_pick:{cid}:{step}:{opt.option_code}"[:64]
+        kb.row(InlineKeyboardButton(text=opt.option_text[:40], callback_data=cb))
     kb.row(InlineKeyboardButton(text="❌ Отклонить", callback_data=f"adm_pick_reject:{cid}"))
+
     client_name = message.from_user.full_name or str(cid)
-    caption = f"<b>📷 Нужен твой ответ</b>\n👤 {client_name}\nШаг: {STEP_LABELS.get(step, step)}\nУслуга: {data.get('service_name')}\n\nВыбери вариант:"
+    caption = (
+        f"<b>📷 Нужен твой ответ</b>\n👤 {client_name}\n"
+        f"Шаг: {STEP_LABELS.get(step, step)}\n"
+        f"Услуга: {data.get('service_name')}\n\nВыбери вариант:"
+    )
     await notify_admins(bot, caption, photo.file_id)
     for admin_id in settings.ADMIN_IDS:
         try:
-            await bot.send_message(admin_id, "Варианты:", reply_markup=kb.as_markup())
+            await bot.send_message(int(admin_id), "Варианты:", reply_markup=kb.as_markup())
         except Exception:
             pass
 
@@ -361,7 +394,8 @@ async def waiting_admin_block(message: Message):
 
 @router.callback_query(F.data.startswith("adm_pick_reject:"))
 async def admin_pick_reject(callback: CallbackQuery, bot: Bot, state: FSMContext):
-    if callback.from_user.id not in settings.ADMIN_IDS:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
         return
     client_id = int(callback.data.split(":")[1])
     pending_sessions.pop_session(client_id)
@@ -388,7 +422,20 @@ async def admin_pick_reject(callback: CallbackQuery, bot: Bot, state: FSMContext
 
 @router.callback_query(F.data.startswith("adm_pick:"))
 async def admin_pick_option(callback: CallbackQuery, bot: Bot, state: FSMContext):
-    if callback.from_user.id not in settings.ADMIN_IDS:
+    try:
+        await _admin_pick_option_impl(callback, bot, state)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).exception("adm_pick failed")
+        try:
+            await callback.answer(f"Ошибка: {e}", show_alert=True)
+        except Exception:
+            pass
+
+
+async def _admin_pick_option_impl(callback: CallbackQuery, bot: Bot, state: FSMContext):
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
         return
     parts = callback.data.split(":")
     if len(parts) < 4:
@@ -396,13 +443,19 @@ async def admin_pick_option(callback: CallbackQuery, bot: Bot, state: FSMContext
         return
     client_id = int(parts[1])
     step = parts[2]
-    option_code = parts[3]
+    option_code = ":".join(parts[3:])  # на случай двоеточий в коде
     bot_id = callback.bot.id or bot.id
+    if bot_id is None:
+        me = await bot.get_me()
+        bot_id = me.id
     key = StorageKey(bot_id=bot_id, chat_id=client_id, user_id=client_id)
     storage = state.storage
 
-    # 1) сначала устойчивое хранилище, 2) FSM клиентки
-    data = pending_sessions.get_session(client_id)
+    data = None
+    try:
+        data = pending_sessions.get_session(client_id)
+    except Exception:
+        data = None
     if not data:
         try:
             data = await storage.get_data(key)
@@ -410,7 +463,7 @@ async def admin_pick_option(callback: CallbackQuery, bot: Bot, state: FSMContext
             data = None
     if not data or not data.get("service_code"):
         await callback.answer(
-            "Сессия записи не найдена. Попроси клиентку начать запись заново.",
+            "Сессия записи не найдена. Попроси клиентку отправить фото ещё раз или начать запись заново.",
             show_alert=True,
         )
         return
