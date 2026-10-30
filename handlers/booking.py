@@ -364,11 +364,23 @@ async def admin_pick_reject(callback: CallbackQuery, bot: Bot, state: FSMContext
     if callback.from_user.id not in settings.ADMIN_IDS:
         return
     client_id = int(callback.data.split(":")[1])
-    key = StorageKey(bot_id=bot.id, chat_id=client_id, user_id=client_id)
-    await state.storage.set_state(key, None)
-    await state.storage.set_data(key, {})
+    pending_sessions.pop_session(client_id)
+    bot_id = callback.bot.id or bot.id
+    key = StorageKey(bot_id=bot_id, chat_id=client_id, user_id=client_id)
     try:
-        await bot.send_message(client_id, "😔 Не получилось определить по фото. Начни запись заново или пришли другое фото.")
+        await state.storage.set_state(key, None)
+        await state.storage.set_data(key, {})
+    except Exception:
+        pass
+    try:
+        await bot.send_message(
+            client_id,
+            "😔 Не получилось определить по фото. Начни запись заново или пришли другое фото.",
+        )
+    except Exception:
+        pass
+    try:
+        await callback.message.edit_text((callback.message.text or "Варианты") + "\n\n❌ Отклонено")
     except Exception:
         pass
     await callback.answer("Отклонено")
@@ -379,19 +391,40 @@ async def admin_pick_option(callback: CallbackQuery, bot: Bot, state: FSMContext
     if callback.from_user.id not in settings.ADMIN_IDS:
         return
     parts = callback.data.split(":")
-    client_id, step, option_code = int(parts[1]), parts[2], parts[3]
-    key = StorageKey(bot_id=bot.id, chat_id=client_id, user_id=client_id)
-    storage = state.storage
-    data = await storage.get_data(key)
-    if not data:
-        await callback.answer("Сессия устарела", show_alert=True)
+    if len(parts) < 4:
+        await callback.answer("Ошибка данных", show_alert=True)
         return
-    selected = data.get("selected_params", {})
-    selected_texts = data.get("selected_params_text", {})
+    client_id = int(parts[1])
+    step = parts[2]
+    option_code = parts[3]
+    bot_id = callback.bot.id or bot.id
+    key = StorageKey(bot_id=bot_id, chat_id=client_id, user_id=client_id)
+    storage = state.storage
+
+    # 1) сначала устойчивое хранилище, 2) FSM клиентки
+    data = pending_sessions.get_session(client_id)
+    if not data:
+        try:
+            data = await storage.get_data(key)
+        except Exception:
+            data = None
+    if not data or not data.get("service_code"):
+        await callback.answer(
+            "Сессия записи не найдена. Попроси клиентку начать запись заново.",
+            show_alert=True,
+        )
+        return
+
+    selected = dict(data.get("selected_params") or {})
+    selected_texts = dict(data.get("selected_params_text") or {})
     selected[step] = option_code
+
     async with async_session() as session:
         pricing = PricingService(session)
         service = await pricing.get_service_by_code(data["service_code"])
+        if not service:
+            await callback.answer("Услуга не найдена", show_alert=True)
+            return
         option = await pricing.get_option(service.id, step, option_code)
         if option:
             selected_texts[step] = option.option_text
@@ -400,42 +433,78 @@ async def admin_pick_option(callback: CallbackQuery, bot: Bot, state: FSMContext
             opt = await pricing.get_option(service.id, "design", selected["design"])
             if opt and opt.price_modifier:
                 price -= opt.price_modifier * 0.5
+        # options for next step if needed
+        next_step = next_nails_step(selected, step)
+        next_options = []
+        if next_step:
+            next_options = await pricing.get_parameters_for_step(service.id, next_step)
+
     data["selected_params"] = selected
     data["selected_params_text"] = selected_texts
     data["duration"] = duration
     data["price"] = price
-    await storage.set_data(key, data)
-    next_step = next_nails_step(selected, step)
+    data.pop("_ts", None)
+    data.pop("_step", None)
+
+    # обновляем оба хранилища
     try:
-        await bot.send_message(client_id, f"✅ Мастер выбрал: <b>{selected_texts.get(step)}</b>\nПродолжаем!", parse_mode="HTML")
+        await storage.set_data(key, data)
     except Exception:
         pass
+    pending_sessions.update_session(client_id, data)
+
+    label = selected_texts.get(step, option_code)
+    try:
+        await bot.send_message(
+            client_id,
+            f"✅ Мастер выбрал: <b>{label}</b>\nПродолжаем!",
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
     client_state = FSMContext(storage=storage, key=key)
     if next_step is None:
+        pending_sessions.pop_session(client_id)
         await client_state.set_state(BookingStates.confirming_params)
         pt = _build_params_text(selected_texts)
-        await bot.send_message(client_id, f"<b>📋 Итог</b>\n\n{format_booking_summary(service.name, duration, price, params_text=pt)}\n\nК дате?",
-                               reply_markup=confirm_params_kb(duration, price), parse_mode="HTML")
+        await bot.send_message(
+            client_id,
+            f"<b>📋 Итог</b>\n\n{format_booking_summary(service.name, duration, price, params_text=pt)}\n\nК дате?",
+            reply_markup=confirm_params_kb(duration, price),
+            parse_mode="HTML",
+        )
     else:
+        # если следующий шаг тоже с фото — сессию оставляем
         state_map = {
-            "design": BookingStates.design, "length": BookingStates.length,
-            "claws": BookingStates.claws, "communication": BookingStates.communication,
+            "design": BookingStates.design,
+            "length": BookingStates.length,
+            "claws": BookingStates.claws,
+            "communication": BookingStates.communication,
             "nails_condition": BookingStates.nails_condition,
-            "has_coating": BookingStates.has_coating, "coating_type": BookingStates.has_coating,
-            "procedure": BookingStates.has_coating, "without_type": BookingStates.has_coating,
+            "has_coating": BookingStates.has_coating,
+            "coating_type": BookingStates.has_coating,
+            "procedure": BookingStates.has_coating,
+            "without_type": BookingStates.has_coating,
         }
         await client_state.set_state(state_map.get(next_step, BookingStates.confirming_params))
-        async with async_session() as session:
-            pricing = PricingService(session)
-            options = await pricing.get_parameters_for_step(service.id, next_step)
-        title = options[0].step_title if options else next_step
-        await bot.send_message(client_id, f"<b>💅 {service.name}</b>\n\n⏱ {format_duration(duration)} · 💰 {format_price(price)}\n\n<b>{title}</b>",
-                               reply_markup=parameter_options_kb(next_step, options), parse_mode="HTML")
-    await callback.answer("Передано")
+        title = next_options[0].step_title if next_options else STEP_LABELS.get(next_step, next_step)
+        await bot.send_message(
+            client_id,
+            f"<b>💅 {service.name}</b>\n\n⏱ {format_duration(duration)} · 💰 {format_price(price)}\n\n<b>{title}</b>",
+            reply_markup=parameter_options_kb(next_step, next_options),
+            parse_mode="HTML",
+        )
+        # если следующий шаг не ждёт админа по фото — pending можно убрать
+        pending_sessions.pop_session(client_id)
+
     try:
-        await callback.message.edit_text((callback.message.text or "") + f"\n✅ {selected_texts.get(step)}")
+        await callback.message.edit_text(
+            (callback.message.text or "Варианты") + f"\n✅ {label}"
+        )
     except Exception:
         pass
+    await callback.answer("Передано")
 
 
 @router.callback_query(F.data == "booking:confirm_params")
