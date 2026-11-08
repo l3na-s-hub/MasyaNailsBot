@@ -30,7 +30,10 @@ router = Router(name="admin")
 
 
 def is_admin(user_id: int) -> bool:
-    return user_id in settings.ADMIN_IDS
+    try:
+        return int(user_id) in {int(x) for x in settings.ADMIN_IDS}
+    except Exception:
+        return False
 
 
 @router.message(Command("admin"))
@@ -144,6 +147,7 @@ async def admin_cancel_booking(callback: CallbackQuery, bot: Bot):
 @router.callback_query(F.data == "admin:month_bookings")
 async def admin_month_bookings_start(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
         return
     now = datetime.now(TZ)
     await _show_month_bookings(callback, now.year, now.month)
@@ -152,52 +156,88 @@ async def admin_month_bookings_start(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("admin_mb:"))
 async def admin_month_bookings_nav(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
         return
-    _, y, m = callback.data.split(":")
-    await _show_month_bookings(callback, int(y), int(m))
+    try:
+        _, y, m = callback.data.split(":")
+        await _show_month_bookings(callback, int(y), int(m))
+    except Exception as e:
+        await callback.answer(f"Ошибка: {e}", show_alert=True)
 
 
 async def _show_month_bookings(callback: CallbackQuery, year: int, month: int):
-    async with async_session() as session:
-        start = date(year, month, 1)
-        end = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
-        result = await session.execute(
-            select(Booking)
-            .options(selectinload(Booking.service), selectinload(Booking.user))
-            .where(
-                Booking.booking_date >= start,
-                Booking.booking_date < end,
-                Booking.status.in_(["confirmed", "pending_photo", "pending_payment", "completed"])
+    """Список записей за месяц. Режем текст под лимит Telegram (4096)."""
+    try:
+        async with async_session() as session:
+            start = date(year, month, 1)
+            end = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+            result = await session.execute(
+                select(Booking)
+                .options(selectinload(Booking.service), selectinload(Booking.user))
+                .where(
+                    Booking.booking_date >= start,
+                    Booking.booking_date < end,
+                    Booking.status.in_(["confirmed", "pending_photo", "pending_payment", "completed"])
+                )
+                .order_by(Booking.booking_date, Booking.start_time)
             )
-            .order_by(Booking.booking_date, Booking.start_time)
-        )
-        bookings = list(result.scalars().all())
+            bookings = list(result.scalars().all())
 
-    if not bookings:
-        text = f"📆 Записей за {MONTH_NAMES[month]} {year} нет."
-    else:
-        lines = [f"<b>📆 Записи за {MONTH_NAMES[month]} {year}</b>\n"]
-        current_day = None
-        for b in bookings:
-            if b.booking_date != current_day:
-                current_day = b.booking_date
-                lines.append(f"\n<b>{current_day.strftime('%d-%m')}</b>")
-            contact = b.user.phone or (b.selected_params or {}).get("contact") or ""
-            status_mark = " ✅" if b.status == "completed" else ""
-            contact_s = f" · 📱 {contact}" if contact else ""
-            params = format_selected_params(b.selected_params)
-            params_s = f"\n    {params.replace(chr(10), chr(10) + '    ')}" if params else ""
-            lines.append(
-                f"  {b.start_time.strftime('%H:%M')} {b.service.name} — {format_price(b.total_price)}{status_mark}{contact_s}{params_s}"
-            )
-        text = "\n".join(lines)
+        month_label = MONTH_NAMES[month] if 1 <= month <= 12 else str(month)
+        if not bookings:
+            text = f"📆 Записей за {month_label} {year} нет."
+        else:
+            lines = [f"<b>📆 Записи за {month_label} {year}</b> ({len(bookings)} шт.)\n"]
+            current_day = None
+            for b in bookings:
+                try:
+                    if b.booking_date != current_day:
+                        current_day = b.booking_date
+                        lines.append(f"\n<b>{current_day.strftime('%d-%m')}</b>")
+                    user = b.user
+                    contact = ""
+                    if user and user.phone:
+                        contact = user.phone
+                    elif isinstance(b.selected_params, dict):
+                        contact = str(b.selected_params.get("contact") or "")
+                    status_mark = {
+                        "completed": " ✅",
+                        "pending_payment": " 💳",
+                        "pending_photo": " 📷",
+                        "confirmed": "",
+                    }.get(b.status, f" [{b.status}]")
+                    contact_s = f" · 📱 {contact}" if contact else ""
+                    svc_name = b.service.name if b.service else "услуга"
+                    # без длинных params в списке — иначе >4096 и edit_text падает
+                    lines.append(
+                        f"  #{b.id} {b.start_time.strftime('%H:%M')} {svc_name} — "
+                        f"{format_price(b.total_price or 0)}{status_mark}{contact_s}"
+                    )
+                except Exception:
+                    lines.append(f"  #{getattr(b, 'id', '?')} (ошибка строки)")
+            text = "\n".join(lines)
 
-    await callback.message.edit_text(
-        text,
-        reply_markup=admin_month_nav_kb("admin_mb", year, month),
-        parse_mode="HTML"
-    )
-    await callback.answer()
+        if len(text) > 4000:
+            text = text[:3950] + "\n\n… список обрезан, слишком много записей."
+
+        kb = admin_month_nav_kb("admin_mb", year, month)
+        try:
+            await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        except Exception:
+            # если нельзя edit (фото и т.п.) — новым сообщением
+            try:
+                await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
+            except Exception as e2:
+                await callback.answer(f"Не удалось показать: {e2}", show_alert=True)
+                return
+        await callback.answer()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).exception("month_bookings failed")
+        try:
+            await callback.answer(f"Ошибка: {e}", show_alert=True)
+        except Exception:
+            pass
 
 
 # === Статистика ===
